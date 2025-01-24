@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/docker/cli/cli/config"
 	"github.com/loft-sh/devpod/pkg/command"
@@ -44,13 +45,15 @@ func ConfigureCredentialsContainer(userName string, port int, log log.Logger) er
 	return configureCredentials(userName, "#!/bin/sh", "/usr/local/bin", configDir, port, log)
 }
 
+const AzureContainerRegistryUsername = "00000000-0000-0000-0000-000000000000"
+
 func configureCredentials(userName, shebang string, targetDir, configDir string, port int, log log.Logger) error {
 	binaryPath, err := os.Executable()
 	if err != nil {
 		return err
 	}
 
-	err = file.MkdirAll(userName, configDir, 0777)
+	err = file.MkdirAll(userName, configDir, 0755)
 	if err != nil {
 		return err
 	}
@@ -64,7 +67,7 @@ func configureCredentials(userName, shebang string, targetDir, configDir string,
 	credentialHelperPath := filepath.Join(targetDir, "docker-credential-devpod")
 	log.Debugf("Wrote docker credentials helper to %s", credentialHelperPath)
 	err = os.WriteFile(credentialHelperPath, []byte(fmt.Sprintf(shebang+`
-'%s' agent docker-credentials --port '%d' "$@"`, binaryPath, port)), 0777)
+'%s' agent docker-credentials --port '%d' "$@"`, binaryPath, port)), 0755)
 	if err != nil {
 		return errors.Wrap(err, "write credential helper")
 	}
@@ -162,9 +165,15 @@ func GetAuthConfig(host string) (*Credentials, error) {
 		return nil, err
 	}
 
+	// In case of Azure registry we need to set the azure username to a default, in case it's not set.
+	if ac.Username == "" && strings.HasSuffix(ac.ServerAddress, "azurecr.io") {
+		ac.Username = AzureContainerRegistryUsername
+	}
+
 	if ac.IdentityToken != "" {
 		return &Credentials{
 			ServerURL: host,
+			Username:  ac.Username,
 			Secret:    ac.IdentityToken,
 		}, nil
 	}

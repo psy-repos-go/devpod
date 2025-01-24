@@ -26,6 +26,8 @@ func NewCustomDriver(workspaceInfo *provider2.AgentWorkspaceInfo, log log.Logger
 	}
 }
 
+var _ driver.Driver = (*customDriver)(nil)
+
 type customDriver struct {
 	log log.Logger
 
@@ -223,6 +225,32 @@ func (c *customDriver) RunDevContainer(ctx context.Context, workspaceId string, 
 	}
 
 	return nil
+}
+
+func (c *customDriver) GetDevContainerLogs(ctx context.Context, workspaceID string, stdout io.Writer, stderr io.Writer) error {
+	// run command
+	err := c.runCommand(
+		ctx,
+		workspaceID,
+		"getDevContainerLogs",
+		c.workspaceInfo.Agent.Custom.GetDevContainerLogs,
+		nil,
+		stdout,
+		stderr,
+		nil,
+		c.log,
+	)
+	if err != nil {
+		return fmt.Errorf("error getting devcontainer logs: %w", err)
+	}
+
+	return nil
+}
+
+var _ driver.ReprovisioningDriver = (*customDriver)(nil)
+
+func (c *customDriver) CanReprovision() bool {
+	return c.workspaceInfo.Agent.Custom.CanReprovision == "true"
 }
 
 func (c *customDriver) runCommand(

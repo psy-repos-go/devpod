@@ -38,9 +38,10 @@ func NewImportCmd(flags *flags.GlobalFlags) *cobra.Command {
 		GlobalFlags: flags,
 	}
 	importCmd := &cobra.Command{
-		Use:   "import",
-		Short: "Imports a workspace configuration",
-		Args:  cobra.NoArgs,
+		Use:    "import",
+		Short:  "Imports a workspace configuration",
+		Args:   cobra.NoArgs,
+		Hidden: true,
 		RunE: func(_ *cobra.Command, args []string) error {
 			ctx := context.Background()
 			devPodConfig, err := config.LoadConfig(cmd.Context, cmd.Provider)
@@ -86,7 +87,7 @@ func (cmd *ImportCmd) Run(ctx context.Context, devPodConfig *config.Config, log 
 	}
 
 	// check if conflicting ids
-	err = cmd.checkForConflictingIDs(exportConfig, devPodConfig, log)
+	err = cmd.checkForConflictingIDs(ctx, exportConfig, devPodConfig, log)
 	if err != nil {
 		return err
 	}
@@ -260,8 +261,8 @@ func (cmd *ImportCmd) importProvider(devPodConfig *config.Config, exportConfig *
 	return nil
 }
 
-func (cmd *ImportCmd) checkForConflictingIDs(exportConfig *provider.ExportConfig, devPodConfig *config.Config, log log.Logger) error {
-	workspaces, err := workspace.ListWorkspaces(devPodConfig, log)
+func (cmd *ImportCmd) checkForConflictingIDs(ctx context.Context, exportConfig *provider.ExportConfig, devPodConfig *config.Config, log log.Logger) error {
+	workspaces, err := workspace.List(ctx, devPodConfig, false, log)
 	if err != nil {
 		return fmt.Errorf("error listing workspaces: %w", err)
 	}
