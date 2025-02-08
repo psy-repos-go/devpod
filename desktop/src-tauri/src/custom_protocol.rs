@@ -1,9 +1,12 @@
 use crate::ui_messages::{
-    send_ui_message, ImportWorkspaceMsg, OpenWorkspaceMsg, SetupProMsg, UiMessage,
+    send_ui_message, ImportWorkspaceMsg, OpenWorkspaceMsg, SetupProMsg, ShowToastMsg, ToastStatus,
+    UiMessage,
 };
 use crate::AppState;
-use log::{error, info};
+use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
+use std::env;
+use std::path::Path;
 use tauri::{AppHandle, Manager, State};
 use thiserror::Error;
 use url::Url;
@@ -166,13 +169,7 @@ impl CustomProtocol {
                 let request = UrlParser::parse(&url_scheme.to_string());
                 let app_state = app_handle.state::<AppState>();
                 if let Err(err) = request {
-                    #[cfg(not(target_os = "windows"))]
-                    send_ui_message(
-                        app_state,
-                        UiMessage::CommandFailed(err),
-                        "Failed to broadcast custom protocol message",
-                    )
-                    .await;
+                    warn!("Failed to broadcast custom protocol message: {:?}", err);
                     return;
                 }
                 let request = request.unwrap();
@@ -200,28 +197,37 @@ impl CustomProtocol {
             match result {
                 Ok(..) => {}
                 Err(error) => {
-                    let msg = "Either update-desktop-database or xdg-mime are missing. Please make sure they are available on your system";
-                    log::warn!("Custom protocol setup failed; {}: {}", msg, error);
+                    let mut is_flatpak = false;
 
-                    tauri::async_runtime::block_on(async {
-                        let app_state = app.state::<AppState>();
-                        let show_toast_msg = ShowToastMsg::new(
-                            "Custom protocol handling needs to be configured".to_string(),
-                            msg.to_string(),
-                            ToastStatus::Warning,
-                        );
-                        if let Err(err) = app_state
-                            .ui_messages
-                            .send(UiMessage::ShowToast(show_toast_msg))
-                            .await
-                        {
-                            log::error!(
-                                "Failed to broadcast show toast message: {:?}, {}",
-                                err.0,
-                                err
+                    match env::var("FLATPAK_ID") {
+                        Ok(_) => is_flatpak = true,
+                        Err(_) => is_flatpak = false,
+                    }
+
+                    if !is_flatpak {
+                        let msg = "Either update-desktop-database or xdg-mime are missing. Please make sure they are available on your system";
+                        log::warn!("Custom protocol setup failed; {}: {}", msg, error);
+
+                        tauri::async_runtime::block_on(async {
+                            let app_state = app.state::<AppState>();
+                            let show_toast_msg = ShowToastMsg::new(
+                                "Custom protocol handling needs to be configured".to_string(),
+                                msg.to_string(),
+                                ToastStatus::Warning,
                             );
-                        };
-                    })
+                            if let Err(err) = app_state
+                                .ui_messages
+                                .send(UiMessage::ShowToast(show_toast_msg))
+                                .await
+                            {
+                                log::error!(
+                                    "Failed to broadcast show toast message: {:?}, {}",
+                                    err.0,
+                                    err
+                                );
+                            };
+                        })
+                    }
                 }
             };
         }
@@ -335,13 +341,14 @@ mod tests {
         #[test]
         fn should_parse_full() {
             let url_str =
-                "devpod://import?workspace-id=workspace&workspace-uid=uid&devpod-pro-host=devpod.pro&other=other";
+                "devpod://import?workspace-id=workspace&workspace-uid=uid&devpod-pro-host=devpod.pro&other=other&project=foo";
             let request = UrlParser::parse(&url_str).unwrap();
 
             let got: ImportWorkspaceMsg = CustomProtocol::parse(&request).unwrap();
 
             assert_eq!(got.workspace_id, "workspace".to_string());
             assert_eq!(got.workspace_uid, "uid".to_string());
+            assert_eq!(got.project, "foo".to_string());
             assert_eq!(got.devpod_pro_host, "devpod.pro".to_string());
             assert_eq!(got.options.get("other"), Some(&"other".to_string()));
         }

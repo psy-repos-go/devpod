@@ -88,5 +88,80 @@ var _ = DevPodDescribe("devpod provider test suite", func() {
 			err = f.DevPodProviderUse(context.Background(), "provider2")
 			framework.ExpectError(err)
 		})
+
+		ginkgo.It("should list all providers", func() {
+			tempDir, err := framework.CopyToTempDir("tests/provider/testdata/simple-k8s-provider")
+			framework.ExpectNoError(err)
+			ginkgo.DeferCleanup(framework.CleanupTempDir, initialDir, tempDir)
+
+			f := framework.NewDefaultFramework(initialDir + "/bin")
+
+			// Ensure that provider 1 is deleted
+			err = f.DevPodProviderDelete(ctx, "provider1", "--ignore-not-found")
+			framework.ExpectNoError(err)
+
+			// Add provider 1
+			err = f.DevPodProviderAdd(ctx, tempDir+"/provider1.yaml")
+			framework.ExpectNoError(err)
+			// Ensure provider 1 exists
+			err = f.DevPodProviderUse(context.Background(), "provider1")
+			framework.ExpectNoError(err)
+
+			// Add .DS_Store file to tempDir
+			err = os.Mkdir(tempDir+"/.DS_Store", 0755)
+			framework.ExpectNoError(err)
+
+			// List providers
+			err = f.DevPodProviderList(context.Background())
+			framework.ExpectNoError(err)
+
+			// Cleanup: delete provider 1
+			err = f.DevPodProviderDelete(ctx, "provider1")
+			framework.ExpectNoError(err)
+
+			// Cleanup: ensure provider 1 is deleted
+			err = f.DevPodProviderUse(context.Background(), "provider1")
+			framework.ExpectError(err)
+		})
+
+		ginkgo.It("should parse options", func() {
+			tempDir, err := framework.CopyToTempDir("tests/provider/testdata/simple-k8s-provider")
+			framework.ExpectNoError(err)
+			ginkgo.DeferCleanup(framework.CleanupTempDir, initialDir, tempDir)
+
+			f := framework.NewDefaultFramework(initialDir + "/bin")
+
+			// Ensure that provider is deleted
+			err = f.DevPodProviderDelete(ctx, "provider3", "--ignore-not-found")
+			framework.ExpectNoError(err)
+
+			podManifest := `
+apiVersion: v1
+kind: Pod
+metadata:
+	name: test
+spec:
+	containers:
+	- name: devpod
+`
+			// Add provider
+			err = f.DevPodProviderAdd(ctx, tempDir+"/provider3.yaml", "--option=TEMPLATE="+podManifest)
+			framework.ExpectNoError(err)
+			// Ensure provider exists
+			err = f.DevPodProviderUse(context.Background(), "provider3")
+			framework.ExpectNoError(err)
+
+			// look for template option
+			err = f.DevPodProviderFindOption(context.Background(), "provider3", podManifest)
+			framework.ExpectNoError(err)
+
+			// Cleanup: delete provider
+			err = f.DevPodProviderDelete(ctx, "provider3")
+			framework.ExpectNoError(err)
+
+			// Cleanup: ensure provider is deleted
+			err = f.DevPodProviderUse(context.Background(), "provider3")
+			framework.ExpectError(err)
+		})
 	})
 })

@@ -21,6 +21,8 @@ type BuildInfo struct {
 	ImageMetadata *ImageMetadataConfig
 	ImageName     string
 	PrebuildHash  string
+	RegistryCache string
+	Tags          []string
 
 	Dockerless *BuildInfoDockerless
 }

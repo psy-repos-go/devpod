@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/loft-sh/devpod/pkg/devcontainer/config"
 	"github.com/loft-sh/devpod/pkg/driver"
@@ -20,7 +21,7 @@ func (r *runner) Build(ctx context.Context, options provider.BuildOptions) (stri
 		return "", fmt.Errorf("building only supported with docker driver")
 	}
 
-	substitutedConfig, substitutionContext, err := r.prepare(options.CLIOptions)
+	substitutedConfig, substitutionContext, err := r.getSubstitutedConfig(options.CLIOptions)
 	if err != nil {
 		return "", err
 	}
@@ -43,6 +44,13 @@ func (r *runner) Build(ctx context.Context, options provider.BuildOptions) (stri
 		return "", errors.Wrap(err, "build image")
 	}
 
+	// have a fallback value for PrebuildHash
+	// in some cases it may be empty, and this would lead to
+	// invalid reference format during image pushing.
+	if buildInfo.PrebuildHash == "" {
+		buildInfo.PrebuildHash = "latest"
+	}
+
 	// prebuild already exists
 	var prebuildImage string
 	if options.Repository != "" {
@@ -62,9 +70,14 @@ func (r *runner) Build(ctx context.Context, options provider.BuildOptions) (stri
 		return prebuildImage, nil
 	}
 
+	if isDockerComposeConfig(substitutedConfig.Config) {
+		if err := dockerDriver.TagDevContainer(ctx, buildInfo.ImageName, prebuildImage); err != nil {
+			return "", errors.Wrap(err, "tag image")
+		}
+	}
+
 	// check if we can push image
-	err = image.CheckPushPermissions(prebuildImage)
-	if err != nil {
+	if err := image.CheckPushPermissions(prebuildImage); err != nil {
 		return "", fmt.Errorf(
 			"cannot push to repository %s. Please make sure you are logged into the registry and credentials are available. (Error: %w)",
 			prebuildImage,
@@ -72,10 +85,28 @@ func (r *runner) Build(ctx context.Context, options provider.BuildOptions) (stri
 		)
 	}
 
+	// Setup all image tags (prebuild and any user defined tags)
+	imageRefs := []string{prebuildImage}
+
+	imageRepoName := strings.Split(prebuildImage, ":")
+	if buildInfo.Tags != nil {
+		for _, tag := range buildInfo.Tags {
+			imageRefs = append(imageRefs, imageRepoName[0]+":"+tag)
+		}
+	}
+
+	// tag the image
+	for _, imageRef := range imageRefs {
+		if err := dockerDriver.TagDevContainer(ctx, prebuildImage, imageRef); err != nil {
+			return "", errors.Wrap(err, "tag image")
+		}
+	}
+
 	// push the image to the registry
-	err = dockerDriver.PushDevContainer(ctx, prebuildImage)
-	if err != nil {
-		return "", errors.Wrap(err, "push image")
+	for _, imageRef := range imageRefs {
+		if err := dockerDriver.PushDevContainer(ctx, imageRef); err != nil {
+			return "", errors.Wrap(err, "push image")
+		}
 	}
 
 	return prebuildImage, nil

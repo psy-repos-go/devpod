@@ -54,7 +54,7 @@ func (r *runner) build(
 		}
 
 		r.Log.Debugf("Loading docker compose project %+v", composeFiles)
-		project, err := compose.LoadDockerComposeProject(composeFiles, envFiles)
+		project, err := compose.LoadDockerComposeProject(ctx, composeFiles, envFiles)
 		if err != nil {
 			return nil, errors.Wrap(err, "load docker compose project")
 		}
@@ -90,11 +90,21 @@ func (r *runner) build(
 			return nil, errors.Wrap(err, "inspect image")
 		}
 
+		// have a fallback value for PrebuildHash
+		// we don't calculate prebuild hash on docker compose builds
+		// let's use Images :tag then
+		imageTag, err := r.getImageTag(ctx, imageDetails.ID)
+		if err != nil {
+			return nil, errors.Wrap(err, "inspect image")
+		}
+
 		return &config.BuildInfo{
 			ImageDetails:  imageDetails,
 			ImageMetadata: imageMetadata,
 			ImageName:     overrideBuildImageName,
-			PrebuildHash:  "",
+			PrebuildHash:  imageTag,
+			RegistryCache: options.RegistryCache,
+			Tags:          options.Tag,
 		}, nil
 	}
 
@@ -114,7 +124,7 @@ func (r *runner) extendImage(
 	}
 
 	// get extend image build info
-	extendedBuildInfo, err := feature.GetExtendedBuildInfo(substitutionContext, imageBuildInfo.Metadata, imageBuildInfo.User, imageBase, parsedConfig, r.Log, options.ForceBuild)
+	extendedBuildInfo, err := feature.GetExtendedBuildInfo(substitutionContext, imageBuildInfo, imageBase, parsedConfig, r.Log, options.ForceBuild)
 	if err != nil {
 		return nil, errors.Wrap(err, "get extended build info")
 	}
@@ -125,6 +135,8 @@ func (r *runner) extendImage(
 			ImageDetails:  imageBuildInfo.ImageDetails,
 			ImageMetadata: extendedBuildInfo.MetadataConfig,
 			ImageName:     imageBase,
+			RegistryCache: options.RegistryCache,
+			Tags:          options.Tag,
 		}, nil
 	}
 
@@ -170,7 +182,7 @@ func (r *runner) buildAndExtendImage(
 	}
 
 	// get extend image build info
-	extendedBuildInfo, err := feature.GetExtendedBuildInfo(substitutionContext, imageBuildInfo.Metadata, imageBuildInfo.User, imageBase, parsedConfig, r.Log, options.ForceBuild)
+	extendedBuildInfo, err := feature.GetExtendedBuildInfo(substitutionContext, imageBuildInfo, imageBase, parsedConfig, r.Log, options.ForceBuild)
 	if err != nil {
 		return nil, errors.Wrap(err, "get extended build info")
 	}
@@ -224,6 +236,14 @@ func (r *runner) getImageBuildInfoFromDockerfile(substitutionContext *config.Sub
 		return nil, errors.Wrap(err, "parse dockerfile")
 	}
 
+	// Check that the build target specified in the devcontainer.json exists in the Dockerfile
+	if target != "" && parsedDockerfile.StagesByTarget != nil {
+		_, ok := parsedDockerfile.StagesByTarget[target]
+		if !ok {
+			return nil, fmt.Errorf("build target does not exist")
+		}
+	}
+
 	baseImage := parsedDockerfile.FindBaseImage(buildArgs, target)
 	if baseImage == "" {
 		return nil, fmt.Errorf("find base image %s", target)
@@ -271,7 +291,7 @@ func (r *runner) buildImage(
 		return nil, err
 	}
 
-	prebuildHash, err := config.CalculatePrebuildHash(parsedConfig.Config, options.Platform, targetArch, config.GetContextPath(parsedConfig.Config), dockerfilePath, dockerfileContent, r.Log)
+	prebuildHash, err := config.CalculatePrebuildHash(parsedConfig.Config, options.Platform, targetArch, config.GetContextPath(parsedConfig.Config), dockerfilePath, dockerfileContent, buildInfo, r.Log)
 	if err != nil {
 		return nil, err
 	}
@@ -287,7 +307,7 @@ func (r *runner) buildImage(
 		r.Log.Debugf("Try to find prebuild image %s in repositories %s", prebuildHash, strings.Join(options.PrebuildRepositories, ","))
 		for _, prebuildRepo := range options.PrebuildRepositories {
 			prebuildImage := prebuildRepo + ":" + prebuildHash
-			img, err := image.GetImage(prebuildImage)
+			img, err := image.GetImageForArch(ctx, prebuildImage, targetArch)
 			if err == nil && img != nil {
 				// prebuild image found
 				r.Log.Infof("Found existing prebuilt image %s", prebuildImage)
@@ -303,6 +323,8 @@ func (r *runner) buildImage(
 					ImageMetadata: extendedBuildInfo.MetadataConfig,
 					ImageName:     prebuildImage,
 					PrebuildHash:  prebuildHash,
+					RegistryCache: options.RegistryCache,
+					Tags:          options.Tag,
 				}, nil
 			} else if err != nil {
 				r.Log.Debugf("Error trying to find prebuild image %s: %v", prebuildImage, err)
@@ -317,7 +339,7 @@ func (r *runner) buildImage(
 			return nil, fmt.Errorf("cannot build devcontainer because driver is non-docker and dockerless fallback is disabled")
 		}
 
-		return dockerlessFallback(r.LocalWorkspaceFolder, substitutionContext.ContainerWorkspaceFolder, parsedConfig, buildInfo, extendedBuildInfo, dockerfileContent)
+		return dockerlessFallback(r.LocalWorkspaceFolder, substitutionContext.ContainerWorkspaceFolder, parsedConfig, buildInfo, extendedBuildInfo, dockerfileContent, options)
 	}
 
 	return dockerDriver.BuildDevContainer(ctx, prebuildHash, parsedConfig, extendedBuildInfo, dockerfilePath, dockerfileContent, r.LocalWorkspaceFolder, options)
@@ -330,10 +352,11 @@ func dockerlessFallback(
 	buildInfo *config.ImageBuildInfo,
 	extendedBuildInfo *feature.ExtendedBuildInfo,
 	dockerfileContent string,
+	options provider.BuildOptions,
 ) (*config.BuildInfo, error) {
 	contextPath := config.GetContextPath(parsedConfig.Config)
 	devPodInternalFolder := filepath.Join(contextPath, config.DevPodContextFeatureFolder)
-	err := os.MkdirAll(devPodInternalFolder, 0777)
+	err := os.MkdirAll(devPodInternalFolder, 0755)
 	if err != nil {
 		return nil, fmt.Errorf("create devpod folder: %w", err)
 	}
@@ -344,7 +367,7 @@ func dockerlessFallback(
 		return nil, fmt.Errorf("rewrite dockerfile: %w", err)
 	} else if devPodDockerfile == "" {
 		devPodDockerfile = filepath.Join(devPodInternalFolder, "Dockerfile-without-features")
-		err = os.WriteFile(devPodDockerfile, []byte(dockerfileContent), 0666)
+		err = os.WriteFile(devPodDockerfile, []byte(dockerfileContent), 0600)
 		if err != nil {
 			return nil, fmt.Errorf("write devpod dockerfile: %w", err)
 		}
@@ -364,6 +387,8 @@ func dockerlessFallback(
 
 			User: buildInfo.User,
 		},
+		RegistryCache: options.RegistryCache,
+		Tags:          options.Tag,
 	}, nil
 }
 

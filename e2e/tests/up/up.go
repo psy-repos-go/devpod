@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/loft-sh/devpod/e2e/framework"
@@ -81,6 +82,73 @@ var _ = DevPodDescribe("devpod up test suite", func() {
 			out, err = f.DevPodSSH(ctx, name, "echo -n $TEST_VAR")
 			framework.ExpectNoError(err)
 			framework.ExpectEqual(out, "", "should be empty")
+
+			// set env vars with file
+			tmpDir, err := framework.CreateTempDir()
+			framework.ExpectNoError(err)
+
+			// create invalid env file
+			invalidData := []byte("TEST VAR=" + value)
+			workspaceEnvFileInvalid := filepath.Join(tmpDir, ".invalid")
+			err = os.WriteFile(
+				workspaceEnvFileInvalid,
+				invalidData, 0o644)
+			framework.ExpectNoError(err)
+			defer os.Remove(workspaceEnvFileInvalid)
+
+			// set env var
+			err = f.DevPodUp(ctx, name, "--workspace-env-file", workspaceEnvFileInvalid)
+			framework.ExpectError(err)
+
+			// create valid env file
+			validData := []byte("TEST_VAR=" + value)
+			workspaceEnvFileValid := filepath.Join(tmpDir, ".valid")
+			err = os.WriteFile(
+				workspaceEnvFileValid,
+				validData, 0o644)
+			framework.ExpectNoError(err)
+			defer os.Remove(workspaceEnvFileValid)
+
+			// set env var
+			err = f.DevPodUp(ctx, name, "--workspace-env-file", workspaceEnvFileValid)
+			framework.ExpectNoError(err)
+
+			// check env var
+			out, err = f.DevPodSSH(ctx, name, "echo -n $TEST_VAR")
+			framework.ExpectNoError(err)
+			framework.ExpectEqual(out, value, "should be set now")
+
+			// delete env var
+			err = f.DevPodUp(ctx, name, "--workspace-env", "TEST_VAR=")
+			framework.ExpectNoError(err)
+
+			// check env var
+			out, err = f.DevPodSSH(ctx, name, "echo -n $TEST_VAR")
+			framework.ExpectNoError(err)
+			framework.ExpectEqual(out, "", "should be empty")
+
+			// create a second valid env file with a different env var
+			validData = []byte("TEST_OTHER_VAR=" + value)
+			workspaceEnvFileValid2 := filepath.Join(tmpDir, ".valid2")
+			err = os.WriteFile(
+				workspaceEnvFileValid2,
+				validData, 0o644)
+			framework.ExpectNoError(err)
+			defer os.Remove(workspaceEnvFileValid2)
+
+			// set env var from both files
+			err = f.DevPodUp(ctx, name, "--workspace-env-file", fmt.Sprintf("%s,%s", workspaceEnvFileValid, workspaceEnvFileValid2))
+			framework.ExpectNoError(err)
+
+			// check env var from .valid file
+			out, err = f.DevPodSSH(ctx, name, "echo -n $TEST_VAR")
+			framework.ExpectNoError(err)
+			framework.ExpectEqual(out, value, "should be set now")
+
+			// check env var from .valid2 file
+			out, err = f.DevPodSSH(ctx, name, "echo -n $TEST_OTHER_VAR")
+			framework.ExpectNoError(err)
+			framework.ExpectEqual(out, value, "should be set now")
 		})
 
 		ginkgo.It("should allow checkout of a GitRepo from a commit hash", func() {
@@ -93,7 +161,7 @@ var _ = DevPodDescribe("devpod up test suite", func() {
 			err = f.DevPodProviderUse(ctx, "docker")
 			framework.ExpectNoError(err)
 
-			name := "vscode-remote-try-python-sha256-0c1547c"
+			name := "sha256-0c1547c"
 			ginkgo.DeferCleanup(f.DevPodWorkspaceDelete, context.Background(), name)
 
 			// Wait for devpod workspace to come online (deadline: 30s)
@@ -111,12 +179,59 @@ var _ = DevPodDescribe("devpod up test suite", func() {
 			err = f.DevPodProviderUse(ctx, "docker")
 			framework.ExpectNoError(err)
 
-			name := "devpod"
+			name := "pr3"
 			ginkgo.DeferCleanup(f.DevPodWorkspaceDelete, context.Background(), name)
 
 			// Wait for devpod workspace to come online (deadline: 30s)
 			err = f.DevPodUp(ctx, "github.com/loft-sh/devpod@pull/3/head")
 			framework.ExpectNoError(err)
+		})
+
+		ginkgo.It("should allow checkout of a private GitRepo", func() {
+			// need to debug
+			if runtime.GOOS == "windows" {
+				ginkgo.Skip("skipping on windows")
+			}
+
+			username := os.Getenv("GH_USERNAME")
+			token := os.Getenv("GH_ACCESS_TOKEN")
+
+			if username == "" || token == "" {
+				ginkgo.Skip("WARNING: skipping test, secrets not found")
+			}
+
+			ctx := context.Background()
+			f := framework.NewDefaultFramework(initialDir + "/bin")
+
+			_ = f.DevPodProviderDelete(ctx, "docker")
+			err := f.DevPodProviderAdd(ctx, "docker")
+			framework.ExpectNoError(err)
+			err = f.DevPodProviderUse(ctx, "docker")
+			framework.ExpectNoError(err)
+
+			// setup git credentials
+			err = exec.Command("git", []string{"config", "--global", "credential.helper", "store"}...).Run()
+			framework.ExpectNoError(err)
+
+			gitCredentialString := []byte("https://" + username + ":" + token + "@github.com")
+			err = os.WriteFile(
+				filepath.Join(os.Getenv("HOME"), ".git-credentials"),
+				gitCredentialString, 0o644)
+			framework.ExpectNoError(err)
+			defer os.Remove(filepath.Join(os.Getenv("HOME"), ".git-credentials"))
+
+			name := "testprivaterepo"
+			ginkgo.DeferCleanup(f.DevPodWorkspaceDelete, context.Background(), name)
+
+			// Wait for devpod workspace to come online (deadline: 30s)
+			err = f.DevPodUp(ctx, "https://github.com/"+username+"/test_private_repo.git")
+			framework.ExpectNoError(err)
+
+			// Ensure git credentials are properly forwarded by cloning the private repo
+			// from within the container
+			out, err := f.DevPodSSH(ctx, name, "git clone https://github.com/"+username+"/test_private_repo")
+			framework.ExpectNoError(err)
+			fmt.Println(out)
 		})
 
 		ginkgo.It("run devpod in Kubernetes", func() {
@@ -277,6 +392,141 @@ var _ = DevPodDescribe("devpod up test suite", func() {
 			framework.ExpectNoError(err)
 		})
 
+		ginkgo.It("recreate a local workspace", func() {
+			const providerName = "test-docker"
+			ctx := context.Background()
+
+			f := framework.NewDefaultFramework(initialDir + "/bin")
+			tempDir, err := framework.CopyToTempDir("tests/up/testdata/no-devcontainer")
+			framework.ExpectNoError(err)
+			ginkgo.DeferCleanup(framework.CleanupTempDir, initialDir, tempDir)
+
+			// provider add, use and delete afterwards
+			err = f.DevPodProviderAdd(ctx, "docker", "--name", providerName)
+			framework.ExpectNoError(err)
+			err = f.DevPodProviderUse(ctx, providerName)
+			framework.ExpectNoError(err)
+			ginkgo.DeferCleanup(func() {
+				err = f.DevPodProviderDelete(ctx, providerName)
+				framework.ExpectNoError(err)
+			})
+
+			err = f.DevPodUp(ctx, tempDir)
+			framework.ExpectNoError(err)
+
+			// recreate
+			err = f.DevPodUpRecreate(ctx, tempDir)
+			framework.ExpectNoError(err)
+
+			err = f.DevPodWorkspaceDelete(ctx, tempDir)
+			framework.ExpectNoError(err)
+		})
+
+		ginkgo.It("create workspace in a subpath", func() {
+			const providerName = "test-docker"
+			ctx := context.Background()
+
+			f := framework.NewDefaultFramework(initialDir + "/bin")
+
+			// provider add, use and delete afterwards
+			err := f.DevPodProviderAdd(ctx, "docker", "--name", providerName)
+			framework.ExpectNoError(err)
+			err = f.DevPodProviderUse(ctx, providerName)
+			framework.ExpectNoError(err)
+			ginkgo.DeferCleanup(func() {
+				err = f.DevPodProviderDelete(ctx, providerName)
+				framework.ExpectNoError(err)
+			})
+
+			err = f.DevPodUp(ctx, "https://github.com/loft-sh/examples@subpath:/devpod/jupyter-notebook-hello-world")
+			framework.ExpectNoError(err)
+
+			id := "subpath--devpod-jupyter-notebook-hello-world"
+			out, err := f.DevPodSSH(ctx, id, "pwd")
+			framework.ExpectNoError(err)
+			framework.ExpectEqual(out, fmt.Sprintf("/workspaces/%s\n", id), "should be subpath")
+
+			err = f.DevPodWorkspaceDelete(ctx, id)
+			framework.ExpectNoError(err)
+		})
+
+		ginkgo.It("recreate a remote workspace", func() {
+			const providerName = "test-docker"
+			ctx := context.Background()
+
+			f := framework.NewDefaultFramework(initialDir + "/bin")
+
+			// provider add, use and delete afterwards
+			err := f.DevPodProviderAdd(ctx, "docker", "--name", providerName)
+			framework.ExpectNoError(err)
+			err = f.DevPodProviderUse(ctx, providerName)
+			framework.ExpectNoError(err)
+			ginkgo.DeferCleanup(func() {
+				err = f.DevPodProviderDelete(ctx, providerName)
+				framework.ExpectNoError(err)
+			})
+
+			id := "subpath--devpod-jupyter-notebook-hello-world"
+			err = f.DevPodUp(ctx, "https://github.com/loft-sh/examples@subpath:/devpod/jupyter-notebook-hello-world")
+			framework.ExpectNoError(err)
+
+			_, err = f.DevPodSSH(ctx, id, "pwd")
+			framework.ExpectNoError(err)
+
+			// recreate
+			err = f.DevPodUpRecreate(ctx, "https://github.com/loft-sh/examples@subpath:/devpod/jupyter-notebook-hello-world")
+			framework.ExpectNoError(err)
+
+			_, err = f.DevPodSSH(ctx, id, "pwd")
+			framework.ExpectNoError(err)
+
+			err = f.DevPodWorkspaceDelete(ctx, id)
+			framework.ExpectNoError(err)
+		})
+
+		ginkgo.It("reset a remote workspace", func() {
+			const providerName = "test-docker"
+			ctx := context.Background()
+
+			f := framework.NewDefaultFramework(initialDir + "/bin")
+
+			// provider add, use and delete afterwards
+			err := f.DevPodProviderAdd(ctx, "docker", "--name", providerName)
+			framework.ExpectNoError(err)
+			err = f.DevPodProviderUse(ctx, providerName)
+			framework.ExpectNoError(err)
+			ginkgo.DeferCleanup(func() {
+				err = f.DevPodWorkspaceDelete(ctx, "jupyter-notebook-hello-world")
+				framework.ExpectNoError(err)
+				err = f.DevPodProviderDelete(ctx, providerName)
+				framework.ExpectNoError(err)
+			})
+
+			id := "subpath--devpod-jupyter-notebook-hello-world"
+			err = f.DevPodUp(ctx, "https://github.com/loft-sh/examples@subpath:/devpod/jupyter-notebook-hello-world")
+			framework.ExpectNoError(err)
+
+			// create files in root and in workspace, after create we expect data to still be there
+			_, err = f.DevPodSSH(ctx, id, fmt.Sprintf("sudo touch /workspaces/%s/DATA", id))
+			framework.ExpectNoError(err)
+			_, err = f.DevPodSSH(ctx, id, "sudo touch /ROOTFS")
+			framework.ExpectNoError(err)
+
+			// reset
+			err = f.DevPodUpReset(ctx, "https://github.com/loft-sh/examples/@subpath:/devpod/jupyter-notebook-hello-world")
+			framework.ExpectNoError(err)
+
+			// this should fail! because --reset should trigger a new git clone
+			_, err = f.DevPodSSH(ctx, id, fmt.Sprintf("ls /workspaces/%s/DATA", id))
+			framework.ExpectError(err)
+			// this should fail! because --recreare should trigger a new build, so a new rootfs
+			_, err = f.DevPodSSH(ctx, id, "ls /ROOTFS")
+			framework.ExpectError(err)
+
+			err = f.DevPodWorkspaceDelete(ctx, id)
+			framework.ExpectNoError(err)
+		})
+
 		ginkgo.Context("print error message correctly", func() {
 			ginkgo.It("make sure devpod output is correct and log-output works correctly", func(ctx context.Context) {
 				f := framework.NewDefaultFramework(initialDir + "/bin")
@@ -331,7 +581,7 @@ var _ = DevPodDescribe("devpod up test suite", func() {
 				initialList, err := f.DevPodList(ctx)
 				framework.ExpectNoError(err)
 				// Wait for devpod workspace to come online (deadline: 30s)
-				err = f.DevPodUp(ctx, "test1234.com")
+				err = f.DevPodUp(ctx, "notfound.loft.sh")
 				framework.ExpectError(err)
 
 				out, err := f.DevPodList(ctx)
